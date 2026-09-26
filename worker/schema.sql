@@ -375,6 +375,20 @@ CREATE TABLE IF NOT EXISTS x_wallet_bindings (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS x_wallet_bindings_key ON x_wallet_bindings (wallet_key);
 
+-- ==============================================================
+-- مكافأة أول تثبيت — لكل جهاز مرة واحدة مدى الحياة
+-- ==============================================================
+-- المفتاح هو بصمة الجهاز (ANDROID_ID) لا التثبيت ولا المحفظة: مسح بيانات
+-- التطبيق أو إعادة تثبيته يولّد تثبيتاً ومحفظة جديدين، لكن البصمة ثابتة —
+-- فالصفّ هنا يبقى شاهداً على أن الجهاز أخذ مكافأته. التلاعب بوقت الهاتف
+-- لا يحرّك شيئاً لأن granted_at يُكتب بساعة الخادم.
+CREATE TABLE IF NOT EXISTS x_install_bonus (
+  fp         TEXT PRIMARY KEY,
+  install_id TEXT NOT NULL,
+  granted_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS x_install_bonus_install ON x_install_bonus (install_id);
+
 -- منع إعادة إرسال الطلبات الحسّاسة بعينها (nonce فريد لكل طلب).
 -- يُطبَّق على المسارات التي تغيّر حالة أو تستهلك رصيداً، لا على كل قراءة:
 -- كتابة صفّ لكل طلب قراءة كان سيرفع الكلفة بلا مقابل أمني حقيقي، فحرس

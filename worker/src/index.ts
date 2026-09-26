@@ -236,6 +236,7 @@ interface XSettings {
   compatSearchCost: number        // ثمن دخول الشركة في التوافقات بالعملات (0 = مجاني)
   schemFilePrice: number          // ثمن فتح ملف مخطط بالعملات (0 = يعتمد المنحة فقط)
   dailyGiftAmount: number         // عملات الهديّة اليومية التي يمنحها زر الهديّة (0 = معطّل)
+  installBonus: number            // عملات مكافأة أول تثبيت على الجهاز (0 = معطّلة)
   videosHidden: boolean           // إيقاف عرض الفيديوهات فوراً للجميع (مفتاح المالك)
   videosHiddenMessage: string     // ما يُعرض للمستخدم حين يكون العرض موقوفاً
   guestCompatQuota: number        // مهجور: كان حصة مستقلة للتوافقات، صار نسخة من dailyFreeQuota
@@ -272,6 +273,7 @@ const DEFAULT_SETTINGS: XSettings = {
   compatSearchCost: 1,
   schemFilePrice: 1,
   dailyGiftAmount: 5,
+  installBonus: 10,
   videosHidden: false,
   videosHiddenMessage: 'الفيديوهات متوقفة مؤقتاً — سنعاود قريباً',
   guestCompatQuota: 5,
@@ -2895,6 +2897,7 @@ export default {
       }
 
       if (path === '/v1/install' && request.method === 'POST') {
+        await rateLimit(env, request, 'install', 30, 3600)
         const body = await request.json() as { installId?: string; appVersion?: string }
         const installId = body.installId?.trim()
         if (!installId || installId.length > 80) throw new HttpError(400, 'installId required')
@@ -2904,7 +2907,50 @@ export default {
            VALUES (?1, ?2, ?3, ?4, ?4, ?5)
            ON CONFLICT(install_id) DO UPDATE SET last_seen = ?4, app_version = ?3, last_ip = ?5`
         ).bind(installId, deviceOf(request) || null, body.appVersion ?? 'unknown', now, ip(request)).run()
-        return json({ ok: true })
+
+        // مكافأة أول تثبيت: عملات ترحيب تُضاف للمحفظة مرة واحدة لكل جهاز.
+        //
+        // المفتاح هو بصمة الجهاز (ANDROID_ID عبر x-device-fp) لا التثبيت:
+        // مسح البيانات أو إعادة التثبيت يولّد تثبيتاً ومحفظة جديدين لكن
+        // البصمة ثابتة، فالصفّ يبقى شاهداً ولا تتكرر المنحة. ووقت الهاتف
+        // لا يدخل الحساب أصلاً — القرار والطابع كلاهما بساعة الخادم.
+        //
+        // بلا بصمة صالحة لا مكافأة: نسخة قديمة بلا x-device-fp تمرّ بلا
+        // منح، بدل أن يُمنح على هوية هشّة تعيد إنتاج نفسها كل تشغيل.
+        let bonus = 0
+        const bonusAmount = Math.max(0, Math.min(1000,
+          Math.floor(Number(settings.installBonus) || 0)))
+        const bonusFp = fingerprint(request)
+        if (bonusAmount > 0 && bonusFp.startsWith('fp:')) {
+          const grant = await env.XDB.prepare(
+            `INSERT INTO x_install_bonus (fp, install_id, granted_at)
+             VALUES (?1, ?2, ?3) ON CONFLICT(fp) DO NOTHING
+             RETURNING fp`
+          ).bind(bonusFp, installId, now).run()
+          if (grant.results.length) {
+            // المفتاح الذرّي نجح: هذا الجهاز لم يأخذ مكافأته بعد.
+            // الإيداع في محفظة التثبيت الحالية أياً كان مفتاحها.
+            const wk = await walletOf(env, request)
+            const nowMs = Date.now()
+            const credit = await env.XDB.prepare(
+              `INSERT INTO x_guest_wallets (device_id, balance, expires_at, created_at, updated_at)
+               SELECT ?1, ?2, 0, ?3, ?3 WHERE changes() = 1
+               ON CONFLICT(device_id) DO UPDATE SET
+                 balance = CASE WHEN expires_at > 0 AND expires_at <= ?4
+                   THEN ?2 ELSE balance + ?2 END,
+                 expires_at = CASE WHEN expires_at > 0 AND expires_at <= ?4
+                   THEN 0 ELSE expires_at END,
+                 updated_at = ?3
+               RETURNING balance`
+            ).bind(wk, bonusAmount, now, nowMs).run()
+            if (credit.results.length) {
+              bonus = bonusAmount
+              await logSecurity(env, request, 'install_bonus',
+                `install=${installId.slice(0, 10)} amount=${bonusAmount}`)
+            }
+          }
+        }
+        return json({ ok: true, bonus })
       }
 
       /**
@@ -4626,6 +4672,7 @@ export default {
             schemFilePrice: Math.max(0, Math.min(1000, Math.floor(
               Number(body.schemFilePrice ?? settings.schemFilePrice) || 0))),
             dailyGiftAmount: Math.max(0, Math.min(1000, Math.floor(Number(body.dailyGiftAmount ?? settings.dailyGiftAmount) || 0))),
+            installBonus: Math.max(0, Math.min(1000, Math.floor(Number(body.installBonus ?? settings.installBonus) || 0))),
             videosHidden: body.videosHidden ?? settings.videosHidden,
             videosHiddenMessage: typeof body.videosHiddenMessage === 'string'
               ? body.videosHiddenMessage.slice(0, 300) : settings.videosHiddenMessage,
