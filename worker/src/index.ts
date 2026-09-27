@@ -197,6 +197,42 @@ function deviceOf(request: Request): string {
   return request.headers.get('x-device-id')?.trim() ?? ''
 }
 
+/**
+ * سقف المنح المجانية لكل عنوان IP في اليوم.
+ *
+ * البصمة `x-device-fp` قيمة يرسلها العميل: مهاجم يوقّع طلباته بنفسه
+ * يولّد (installId جديد + بصمة عشوائية) لكل طلب، فتُعامل منحة التثبيت
+ * والهدية على أنها لجهاز جديد ويتكرر المنح بلا حد — الجدول يحمي البصمة
+ * الحقيقية الواحدة لا بصمة مُختلقة. العنوان وحده ما لا يقدر العميل على
+ * تزويره: `CF-Connecting-IP` تضعه كلاودفلير لا التطبيق.
+ *
+ * السقف 5 لا يؤذي البيت الواحد (أجهزة قليلة خلف NAT) ويكسر مزرعة
+ * الهويات: 30 تثبيتاً في الساعة للعنوان كانت تعني 300 عملة بها كلها.
+ * عند تجاوزه يُرفض المنح بصمت ولا يُرفض الطلب نفسه.
+ */
+async function grantCapReached(
+  env: Env, request: Request, name: string, max = 5
+): Promise<boolean> {
+  const addr = ip(request)
+  if (addr === 'unknown') return false
+  const n = Number(await env.QUOTA.get(`grantcap:${name}:${addr}`)) || 0
+  return n >= max
+}
+
+/**
+ * يُستدعى بعد نجاح المنح فعلياً لا عند الطلب: محاولة مرفوضة لأن النافذة
+ * لم تُكتمل لا تستهلك من سقف العنوان، وإلا ضغط الزر مرتين أفرغ السقف.
+ */
+async function grantCapBump(env: Env, request: Request, name: string): Promise<void> {
+  const addr = ip(request)
+  if (addr === 'unknown') return
+  const key = `grantcap:${name}:${addr}`
+  const n = Number(await env.QUOTA.get(key)) || 0
+  try {
+    await env.QUOTA.put(key, String(n + 1), { expirationTtl: DAY })
+  } catch { /* تعذّر التسجيل لا يمنع ما مُنح فعلاً */ }
+}
+
 function versionOf(request: Request): number {
   return Number(request.headers.get('x-app-version')?.trim() || '0') || 0
 }
@@ -1549,7 +1585,8 @@ const SUSPICIOUS_REASONS = [
   'missing_signature', 'bad_signature', 'stale_signature',
   'device_farm', 'banned_device_hit', 'banned_ip_hit',
   'device_banned', 'ip_banned', 'non_owner_admin_attempt',
-  'guest_token_device_mismatch', 'bad_owner_key', 'scraping_suspected'
+  'guest_token_device_mismatch', 'bad_owner_key', 'scraping_suspected',
+  'gift_ip_cap', 'install_bonus_cap'
 ]
 
 
@@ -2921,13 +2958,24 @@ export default {
         const bonusAmount = Math.max(0, Math.min(1000,
           Math.floor(Number(settings.installBonus) || 0)))
         const bonusFp = fingerprint(request)
-        if (bonusAmount > 0 && bonusFp.startsWith('fp:')) {
+        // شرط إضافي: التطبيق الحقيقي يرسل `x-device-id` مساوياً للبصمة —
+        // ترويستان من قيمة واحدة (ANDROID_ID). اختلافهما يعني عميلاً
+        // يولّد قيماً منفصلة، فلا يُمنح — هذا لا يمنع الاستعمال العادي.
+        const fpMatchesDevice = bonusFp.startsWith('fp:') &&
+          bonusFp.slice(3) === deviceOf(request).toLowerCase()
+        const bonusCapped = bonusAmount > 0 && fpMatchesDevice &&
+          await grantCapReached(env, request, 'install_bonus')
+        if (bonusCapped) {
+          await logSecurity(env, request, 'install_bonus_cap', `ip=${ip(request)}`)
+        }
+        if (bonusAmount > 0 && fpMatchesDevice && !bonusCapped) {
           const grant = await env.XDB.prepare(
             `INSERT INTO x_install_bonus (fp, install_id, granted_at)
              VALUES (?1, ?2, ?3) ON CONFLICT(fp) DO NOTHING
              RETURNING fp`
           ).bind(bonusFp, installId, now).run()
           if (grant.results.length) {
+            await grantCapBump(env, request, 'install_bonus')
             // المفتاح الذرّي نجح: هذا الجهاز لم يأخذ مكافأته بعد.
             // الإيداع في محفظة التثبيت الحالية أياً كان مفتاحها.
             const wk = await walletOf(env, request)
@@ -4225,6 +4273,13 @@ export default {
         if (await fingerprintRotated(env, request, caller)) {
           throw new HttpError(403, 'تعذر تأكيد هوية المحفظة')
         }
+        // بصمة مُختلقة جديدة تفتح نافذة هديّة جديدة — السقف لكل عنوان IP
+        // يجعل كل عنوان يربح 5 هدايا في اليوم كحدّ أقصى مهما اختلق
+        // من هويات، وهو ما يكسر اقتصاد مزرعة التثبيتات الوهمية.
+        if (await grantCapReached(env, request, 'gift')) {
+          await logSecurity(env, request, 'gift_ip_cap', `ip=${ip(request)}`)
+          throw new HttpError(403, 'بلغت الحدّ اليومي للهدايا من هذا العنوان')
+        }
         const stamp = new Date(nowMs).toISOString()
         // الثغرة التي أُغلقت: الاستلام كان مفتاحه المحفظة فقط، ومسح بيانات
         // التطبيق يولّد تثبيتاً جديداً فتُخلق له محفظة `in:` جديدة فتُمنح
@@ -4283,6 +4338,7 @@ export default {
           return json({ ok: false, error: 'يمكن استلام الحصة مرة كل 24 ساعة', status: 409 }, 409)
         }
         const balance = Number((result[1].results[0] as { balance: number }).balance)
+        await grantCapBump(env, request, 'gift')
         await logSecurity(env, request, 'gift_claim', `amount=${amount} role=${caller.role}`)
         return json({
           ok: true, amount, balance, nextAt: nextMs,
