@@ -488,7 +488,11 @@ async function noteAbuse(env: Env, request: Request, reason: string, severity: '
  * والثاني يمنعه حتى لو غيّر عنوانه.
  */
 async function banIp(env: Env, addr: string, reason: string, request?: Request): Promise<void> {
-  await env.QUOTA.put(`hardban:${addr}`, 'perm') // بلا انتهاء
+  // تعذّر تسجيل الحظر في KV (حدّ الكتابة) لا يمنع تسجيله في D1: القرار
+  // يُحفظ في القاعدة، ويبقى الفحص عبر KV أسرع حين يتوفر.
+  try {
+    await env.QUOTA.put(`hardban:${addr}`, 'perm') // بلا انتهاء
+  } catch { /* يُسجَّل في D1 أدناه */ }
   await env.XDB.prepare(
     `INSERT INTO x_bans (id, kind, reason, permanent, at) VALUES (?1, 'ip', ?2, 1, ?3)
      ON CONFLICT(id) DO UPDATE SET reason = ?2, at = ?3`
@@ -497,7 +501,9 @@ async function banIp(env: Env, addr: string, reason: string, request?: Request):
 }
 
 async function banDevice(env: Env, deviceId: string, reason: string, request?: Request): Promise<void> {
-  await env.QUOTA.put(`devban:${deviceId}`, 'perm') // بلا انتهاء
+  try {
+    await env.QUOTA.put(`devban:${deviceId}`, 'perm') // بلا انتهاء
+  } catch { /* يُسجَّل في D1 أدناه */ }
   await env.XDB.prepare(
     `INSERT INTO x_bans (id, kind, reason, permanent, at) VALUES (?1, 'device', ?2, 1, ?3)
      ON CONFLICT(id) DO NOTHING`
@@ -548,7 +554,9 @@ async function detectSweep(
   const dev = deviceOf(request)
   const who = dev || `ip:${ip(request)}`
   const key = `sweep:${bucket}:${who}`
-  const seen = ((await env.QUOTA.get(key, 'json')) as string[] | null) ?? []
+  // تعذّر قراءة KV (حدّ الكتابة اليومي مثلاً) لا يُسقط البحث: فقدان عدّاد
+  // السحب أهون من حرمان مستخدم شرعي من بحثه.
+  const seen = (await kvGetJson<string[]>(env, key)) ?? []
   if (seen.includes(item)) return
   seen.push(item)
   if (seen.length > max) {
@@ -572,6 +580,17 @@ async function detectSweep(
 async function kvGet(env: Env, key: string): Promise<string | null> {
   try {
     return await env.QUOTA.get(key)
+  } catch {
+    return null
+  }
+}
+
+/** قراءة JSON من KV لا تُسقط الطلب عند تعطّل KV أو فساد القيمة. */
+async function kvGetJson<T>(env: Env, key: string): Promise<T | null> {
+  const raw = await kvGet(env, key)
+  if (raw == null) return null
+  try {
+    return JSON.parse(raw) as T
   } catch {
     return null
   }
@@ -874,7 +893,7 @@ async function trackDeviceFarm(env: Env, request: Request): Promise<void> {
   if (list.includes(dev)) return
   list.push(dev)
   if (list.length > 400) {
-    const strikes = Number(await env.QUOTA.get(`farmstrikes:${addr}`)) || 0
+    const strikes = Number(await kvGet(env, `farmstrikes:${addr}`)) || 0
     await logSecurity(env, request, 'device_farm', `devices=${list.length} strikes=${strikes + 1}`)
     if (strikes + 1 >= 3) {
       await logSecurity(env, request, 'ip_hardban', `device-farm strikes=${strikes + 1}`)
@@ -1694,8 +1713,9 @@ interface CatalogModel { name: string; folders: { category: string; id: string }
 interface CatalogEntry { id: string; name: string; mimeType: string; size?: string | number }
 
 async function cached<T>(env: Env, key: string, ttl: number, build: () => Promise<T>): Promise<T> {
-  const hit = await env.QUOTA.get(key, 'json').catch(() => null)
-  if (hit) return hit as T
+  // قراءة الكاش لا تُسقط الطلب عند تعطّل KV أو حدّ الكتابة: نُكمل بالبناء.
+  const hit = await kvGetJson<T>(env, key)
+  if (hit) return hit
   const value = await build()
   // فشل التخزين المؤقت (حدّ الكتابة اليومي مثلاً) لا يُسقط الطلب: القيمة
   // بُنيت بالفعل، وفقدان الكاش يكلّف أداءً لا صحةً.

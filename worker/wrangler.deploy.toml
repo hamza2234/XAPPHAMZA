@@ -1,0 +1,23 @@
+# نشر مؤقت بلا روابط R2.
+#
+# R2 معطّل على الحساب فيمنع Cloudflare نشر أي حزمة تحمل ربط r2_bucket
+# (خطأ 10136). مسارات R2 معطّلة أصلاً في هذه الحالة، فحذف روابطها من
+# النشر لا يخسر شيئاً قائماً، ويسمح بنشر تحصين KV الذي يوقف أخطاء 500
+# في البحث والتوافقات والإقلاع. عند تفعيل R2 يُعاد النشر بـwrangler.toml.
+name = "x-app-api"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "MIRROR"
+database_name = "phonex-mirror"
+database_id = "21af0010-582b-4a88-9a9f-ad8a6a5380c3"
+
+[[d1_databases]]
+binding = "XDB"
+database_name = "x-app-db"
+database_id = "c259c8be-806f-4362-b45c-2c11d2578c06"
+
+[[kv_namespaces]]
+binding = "QUOTA"
+id = "c319bc8396cc40b58c7a3084df00cf21"

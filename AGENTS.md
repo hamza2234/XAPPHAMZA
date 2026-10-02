@@ -543,11 +543,27 @@ cd app && flutter pub get && flutter build apk --release
   فيُوقَّع الإصدار بمفتاح debug (كافٍ للتوزيع اليدوي عبر رابط مباشر).
 - لا تستعمل `flutter build` في الخلفية ثم تفقد السجل: راقب `/tmp/apk_build.log`.
 
+## نشر مؤقت بلا R2 (يفكّ قفل R2 المعطّل)
+
+عندما يكون R2 معطّلاً على الحساب، ترفض Cloudflare نشر أي حزمة تحمل ربط
+`r2_bucket` (خطأ 10136) — فيتعذّر نشر أي إصلاح، ولو لم يمسّ R2. الحل:
+`worker/wrangler.deploy.toml` نسخة نشر بلا روابط R2 (D1 + KV فقط). مسارات
+R2 معطّلة أصلاً في هذه الحالة فلا يخسر النشر شيئاً، ويتيح نشر تحصين KV
+الذي يوقف أخطاء 500. عند تفعيل R2 يُعاد النشر بـ`wrangler.toml`.
+
+```bash
+npx wrangler deploy --config wrangler.deploy.toml
+```
+
+الأسرار (`X_JWT_SECRET`، `X_OWNER_KEY`، `FCM_SERVICE_ACCOUNT`، ...) مخزّنة
+في السكربت المنشور مستقلةً عن الروابط، فلا تُفقد عند إعادة النشر بنفس الاسم.
+
 ## عوائق النشر
 
 - `wrangler deploy` يفشل بـ`R2 binding error ... Please enable R2` عندما يكون
   R2 معطّلاً على الحساب. حتى الـAPI الخام (`PUT /workers/scripts/...`) يرفض
-  حزمة فيها أي `r2_bucket` — لا مخرج برمجياً. الحل تفعيل R2 من لوحة Cloudflare.
+  حزمة فيها أي `r2_bucket` — لا مخرج برمجياً. الحل تفعيل R2 من لوحة Cloudflare،
+  أو النشر المؤقت بـ`wrangler.deploy.toml` (أعلاه) إن لم تُستعمل مسارات R2.
   الدلو `xapp-releases` مضبوط في `wrangler.toml` ويستضيف `PhoneX-v2.0.2.apk`
   الذي يخدمه `/download/PhoneX.apk`.
 - بديل رابط التطبيق حين يتعطّل R2: نشر الـAPK كإصدار GitHub على المستودع
