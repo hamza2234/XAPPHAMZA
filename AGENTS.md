@@ -517,9 +517,45 @@ flutter build apk --release
   وتمرير `context.path`/`context.request` وبدائل الدوال عبر `vm.runInContext`.
   لمسارات المالك، `sealed` يجب أن يُعيد `Response` فعلياً كي يعمل `.json()`.
 
+## بناء APK محلياً (مثبّت ويعمل)
+
+البيئة تبدأ فارغة، وهذا ما ينجح:
+
+```bash
+sudo apt-get install -y openjdk-21-jdk-headless unzip zip
+# Flutter stable (تحقّق من الإصدار من releases_linux.json قبل التنزيل)
+curl -sSL -o /tmp/flutter.tar.xz <flutter_linux_*-stable.tar.xz>
+sudo tar -xJf /tmp/flutter.tar.xz -C /opt
+# Android cmdline-tools ثم:
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+export ANDROID_HOME=/opt/android-sdk
+export PATH=/opt/flutter/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+yes | sdkmanager --licenses
+sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+flutter config --android-sdk /opt/android-sdk --no-analytics
+cd app && flutter pub get && flutter build apk --release
+# الناتج: app/build/app/outputs/flutter-apk/app-release.apk
+```
+
+- Flutter 3.47.6 يطلب: compileSdk/targetSdk=36، minSdk=24، NDK=28.2.13676358.
+- AGP 9.1.0 يحتاج JDK 17+ (نجح مع JDK 21) و Gradle 9.3.1 (يُنزَّل تلقائياً).
+- `android/app/google-services.json` موجود ومتتبَّع؛ `key.properties` غائب
+  فيُوقَّع الإصدار بمفتاح debug (كافٍ للتوزيع اليدوي عبر رابط مباشر).
+- لا تستعمل `flutter build` في الخلفية ثم تفقد السجل: راقب `/tmp/apk_build.log`.
+
 ## عوائق النشر
 
 - `wrangler deploy` يفشل بـ`R2 binding error ... Please enable R2` عندما يكون
-  R2 معطّلاً على الحساب. الحل تفعيل R2 من لوحة Cloudflare، لا تعديل الكود.
-- بيئة التطوير هنا بلا Flutter/Dart/Java، فبناء APK غير ممكن محلياً.
+  R2 معطّلاً على الحساب. حتى الـAPI الخام (`PUT /workers/scripts/...`) يرفض
+  حزمة فيها أي `r2_bucket` — لا مخرج برمجياً. الحل تفعيل R2 من لوحة Cloudflare.
+  الدلو `xapp-releases` مضبوط في `wrangler.toml` ويستضيف `PhoneX-v2.0.2.apk`
+  الذي يخدمه `/download/PhoneX.apk`.
+- بديل رابط التطبيق حين يتعطّل R2: نشر الـAPK كإصدار GitHub على المستودع
+  (عام) — رابط ثابت `releases/latest/download/<file>` يعمل بلا Cloudflare.
+  بعد البناء: `gh release create vX.Y.Z app-release.apk --repo <owner>/<repo>`.
+  ثم حدّث `updateUrl` في `x_settings` (D1) ليشير إليه حتى لا تتعطّل شاشة
+  «حدّث التطبيق» مع تعطّل R2.
+- أسرار الـWorker (X_JWT_SECRET، X_OWNER_KEY، FCM_SERVICE_ACCOUNT، ...) تبقى
+  في السكربت المنشور عبر `wrangler secret put` ولا تُفقد عند إعادة النشر
+  بنفس الاسم.
 
