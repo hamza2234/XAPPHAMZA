@@ -2952,28 +2952,40 @@ export default {
         // البصمة ثابتة، فالصفّ يبقى شاهداً ولا تتكرر المنحة. ووقت الهاتف
         // لا يدخل الحساب أصلاً — القرار والطابع كلاهما بساعة الخادم.
         //
-        // بلا بصمة صالحة لا مكافأة: نسخة قديمة بلا x-device-fp تمرّ بلا
-        // منح، بدل أن يُمنح على هوية هشّة تعيد إنتاج نفسها كل تشغيل.
+        // هوية الجهاز تُقرأ من الترويسات الموجودة أصلاً — بلا أي تغيير في
+        // التطبيق — بالأولوية الأكثر ثباتاً:
+        //   1) `x-device-fp` (ANDROID_ID): يبقى بعد مسح البيانات وبعد
+        //      إعادة التثبيت، فهو المفتاح الذي يمنع المكافأة المزدوجة فعلاً.
+        //   2) `x-device-id`: قيمته نفسها في التطبيق الحقيقي، ويغطي نسخة
+        //      لا ترسل بصمة.
+        //   3) `x-install-id` الموثّق بالتوقيع: فريد لكل تثبيت، آخر ملاذ
+        //      أفضل من العنوان المشترك (NAT) الذي يجمع أجهزة كثيرة.
+        // لا نشترط تطابق البصمة ومعرّف الجهاز: اشتراطه كان يمنح الصفر
+        // لجهاز سليم يرسل ترويستين مختلفتين — وهو عين الشكوى.
         let bonus = 0
         const bonusAmount = Math.max(0, Math.min(1000,
           Math.floor(Number(settings.installBonus) || 0)))
-        const bonusFp = fingerprint(request)
-        // شرط إضافي: التطبيق الحقيقي يرسل `x-device-id` مساوياً للبصمة —
-        // ترويستان من قيمة واحدة (ANDROID_ID). اختلافهما يعني عميلاً
-        // يولّد قيماً منفصلة، فلا يُمنح — هذا لا يمنع الاستعمال العادي.
-        const fpMatchesDevice = bonusFp.startsWith('fp:') &&
-          bonusFp.slice(3) === deviceOf(request).toLowerCase()
-        const bonusCapped = bonusAmount > 0 && fpMatchesDevice &&
+        const fpHeader = request.headers.get('x-device-fp')?.trim().toLowerCase() ?? ''
+        const devHeader = deviceOf(request).trim().toLowerCase()
+        const signedInstall = verifiedInstallOf(request)
+        const isDeviceId = (v: string) => /^[0-9a-f]{16,64}$/.test(v)
+        const bonusFp = isDeviceId(fpHeader) ? `fp:${fpHeader}`
+          : isDeviceId(devHeader) ? `fp:${devHeader}`
+          : signedInstall ? `in:${signedInstall}`
+          : ''
+        const hasDeviceIdentity = bonusFp.startsWith('fp:') ||
+          bonusFp.startsWith('in:')
+        const bonusCapped = bonusAmount > 0 && hasDeviceIdentity &&
           await grantCapReached(env, request, 'install_bonus')
         if (bonusCapped) {
           await logSecurity(env, request, 'install_bonus_cap', `ip=${ip(request)}`)
         }
-        if (bonusAmount > 0 && fpMatchesDevice && !bonusCapped) {
+        if (bonusAmount > 0 && hasDeviceIdentity && !bonusCapped) {
           const grant = await env.XDB.prepare(
             `INSERT INTO x_install_bonus (fp, install_id, granted_at)
              VALUES (?1, ?2, ?3) ON CONFLICT(fp) DO NOTHING
              RETURNING fp`
-          ).bind(bonusFp, installId, now).run()
+          ).bind(bonusFp, signedInstall || installId, now).run()
           if (grant.results.length) {
             await grantCapBump(env, request, 'install_bonus')
             // المفتاح الذرّي نجح: هذا الجهاز لم يأخذ مكافأته بعد.
