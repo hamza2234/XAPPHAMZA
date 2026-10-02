@@ -626,8 +626,10 @@ class Api {
   Future<Map<String, dynamic>> ownerSettings() => ownerGet('/v1/owner/settings');
   Future<Map<String, dynamic>> saveSettings(Map<String, dynamic> s) =>
       ownerSend('PUT', '/v1/owner/settings', s);
-  Future<List<dynamic>> ownerUsers() async =>
-      (await ownerGet('/v1/owner/users'))['users'] as List;
+  Future<List<dynamic>> ownerUsers({String? q}) async =>
+      (await ownerGet('/v1/owner/users',
+              query: (q != null && q.trim().isNotEmpty) ? {'q': q.trim()} : null))['users']
+          as List;
   Future<List<dynamic>> ownerRequests() async =>
       (await ownerGet('/v1/owner/requests'))['requests'] as List;
   /// سجل الأمان — الهجمات فقط افتراضياً، و`all` يكشف كل الأحداث.
@@ -655,14 +657,30 @@ class Api {
       ownerSend('POST', '/v1/owner/users/$id/quota', {'cards': cards, 'days': days});
 
   /// محافظ الزوار: عملات لزائر بلا حساب، مفتاحها معرّف الجهاز.
-  Future<List<dynamic>> ownerWallets() async =>
-      (await ownerGet('/v1/owner/wallets'))['wallets'] as List;
+  /// البحث في الخادم (المعرّف/الاسم/آخر IP) لا في العميل.
+  Future<List<dynamic>> ownerWallets({String? q}) async =>
+      (await ownerGet('/v1/owner/wallets',
+              query: (q != null && q.trim().isNotEmpty) ? {'q': q.trim()} : null))['wallets']
+          as List;
   Future<void> grantWallet(String deviceId, int coins, int days) =>
       ownerSend('POST', '/v1/owner/wallets', {
         'deviceId': deviceId,
         'coins': coins,
         'days': days,
       });
+
+  /// شحن جماعي: يضيف عملات لكل المحافظ. `all: true` يشمل الكل، وإلا
+  /// يقصر الشحن على نتائج البحث `q`. يعيد عدد المحافظ التي تغيّرت.
+  Future<int> grantWalletBulk(int coins, int days,
+      {bool all = false, String? q}) async {
+    final r = await ownerSend('POST', '/v1/owner/wallets/bulk', {
+      'coins': coins,
+      'days': days,
+      'all': all,
+      if (q != null && q.trim().isNotEmpty) 'q': q.trim(),
+    });
+    return (r['affected'] as num?)?.toInt() ?? 0;
+  }
 
   /// تعديل محفظة: تعيين الرصيد والصلاحية إلى قيم محددة.
   Future<void> editWallet(String deviceId, int coins, int days) =>

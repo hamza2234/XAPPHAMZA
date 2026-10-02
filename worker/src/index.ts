@@ -860,19 +860,33 @@ async function trackDeviceFarm(env: Env, request: Request): Promise<void> {
   if (!dev || addr === 'unknown') return
   if (await kvGet(env, `devban:${dev}`)) return
   const key = `devs:${addr}`
-  const list = ((await env.QUOTA.get(key, 'json')) as string[] | null) ?? []
+  // عدّاد تتبّع لا يوقف أي طلب: تعذّر قراءة KV أو الكتابة فيه (حدّ الكتابة
+  // اليومي مثلاً) لا يجوز أن يُسقط مساراً مشروعاً مثل /v1/install. كان
+  // الكتابة غير المحمية تُصعّد الفشل إلى 500 فتُمنع المكافأة والتسجيل.
+  let list: string[]
+  try {
+    list = ((await env.QUOTA.get(key, 'json')) as string[] | null) ?? []
+  } catch {
+    return
+  }
   if (list.includes(dev)) return
   list.push(dev)
   if (list.length > 400) {
     const strikes = Number(await env.QUOTA.get(`farmstrikes:${addr}`)) || 0
-    await env.QUOTA.put(`farmstrikes:${addr}`, String(strikes + 1), { expirationTtl: 7 * DAY })
     await logSecurity(env, request, 'device_farm', `devices=${list.length} strikes=${strikes + 1}`)
     if (strikes + 1 >= 3) {
-      await env.QUOTA.put(`hardban:${addr}`, 'device-farm', { expirationTtl: DAY })
       await logSecurity(env, request, 'ip_hardban', `device-farm strikes=${strikes + 1}`)
+      try {
+        await env.QUOTA.put(`hardban:${addr}`, 'device-farm', { expirationTtl: DAY })
+      } catch { /* تعذّر الحظر لا يمنع الطلب */ }
     }
+    try {
+      await env.QUOTA.put(`farmstrikes:${addr}`, String(strikes + 1), { expirationTtl: 7 * DAY })
+    } catch { /* كما أعلاه */ }
   }
-  await env.QUOTA.put(key, JSON.stringify(list.slice(-500)), { expirationTtl: DAY })
+  try {
+    await env.QUOTA.put(key, JSON.stringify(list.slice(-500)), { expirationTtl: DAY })
+  } catch { /* العدّ الكامل يسقط، والطلب يمضي */ }
 }
 
 /** ربط الحساب بجهاز واحد — أي جهاز آخر يُرفض ويُسجَّل */
@@ -1159,10 +1173,13 @@ async function chargeOne(
   // إن مُرِّر سعر صريح فهو المعتمد، ولو كان صفراً: المالك قد يجعل المخططات
   // مجانية (بالمنحة فقط) بينما التوافقات مدفوعة. غياب السعر (null) يعني
   // مساراً لم يُحدَّد له ثمن فيرجع لسعر التوافقات كي لا يصير مجانياً بالخطأ.
-  const cost = price === null
-    ? Math.max(1, Math.floor(Number(settings.compatSearchCost) || 1))
-    : Math.max(0, Math.floor(price) || 0)
-  if (cost <= 0) return { freeLeft: 0, balance: -1, source: 'free' }
+  //
+  // الصفر «سعر صريح» يعني مجاني، لا «لم يُحدَّد»: قراءته سابقاً عبر `|| 1`
+  // كانت تحوّله واحداً فيُخصم من العملات رغم اختيار المالك للمجانية. نقرأ
+  // الرقم كما هو؛ null وحده يعني «لم يُحدَّد».
+  const rawPrice = price === null ? settings.compatSearchCost : price
+  const cost = Math.max(0, Math.floor(Number(rawPrice) || 0))
+  if (cost <= 0) return { freeLeft: -1, balance: -1, source: 'free' }
   const balance = await spendCoins(env, caller, fp, cost)
   if (balance === null) throw await emptyReason(env, caller, fp)
   return { freeLeft: 0, balance, source: 'coins' }
@@ -1675,10 +1692,14 @@ interface CatalogModel { name: string; folders: { category: string; id: string }
 interface CatalogEntry { id: string; name: string; mimeType: string; size?: string | number }
 
 async function cached<T>(env: Env, key: string, ttl: number, build: () => Promise<T>): Promise<T> {
-  const hit = await env.QUOTA.get(key, 'json')
+  const hit = await env.QUOTA.get(key, 'json').catch(() => null)
   if (hit) return hit as T
   const value = await build()
-  await env.QUOTA.put(key, JSON.stringify(value), { expirationTtl: ttl })
+  // فشل التخزين المؤقت (حدّ الكتابة اليومي مثلاً) لا يُسقط الطلب: القيمة
+  // بُنيت بالفعل، وفقدان الكاش يكلّف أداءً لا صحةً.
+  try {
+    await env.QUOTA.put(key, JSON.stringify(value), { expirationTtl: ttl })
+  } catch { /* نُكمل بالقيمة المبنية */ }
   return value
 }
 
@@ -2126,7 +2147,10 @@ async function ownerLoginGuard(env: Env): Promise<void> {
 async function noteOwnerLoginFail(env: Env, request: Request): Promise<void> {
   const key = `rl:${OWNER_LOCK_BUCKET}`
   const used = Number(await kvGet(env, key)) || 0
-  await env.QUOTA.put(key, String(used + 1), { expirationTtl: 900 })
+  // تعذّر تسجيل محاولة فاشلة لا يجوز أن يمنع الردّ الصحيح على المالك.
+  try {
+    await env.QUOTA.put(key, String(used + 1), { expirationTtl: 900 })
+  } catch { /* لا يمنع الردّ */ }
   await logSecurity(env, request, 'bad_owner_login', `attempt=${used + 1}`)
 }
 
@@ -3425,7 +3449,8 @@ export default {
             freeLimit, freeUsed, freeLeft,
             coins, expiresAt,
             totalLeft: caller.role === 'owner' ? -1 : freeLeft + coins,
-            cost: Math.max(1, Math.floor(Number(settings.compatSearchCost) || 1))
+            // الصفر يعني مجاني: يُعرض كما هو كي يطابق ما يُخصم فعلاً.
+            cost: Math.max(0, Math.floor(Number(settings.compatSearchCost) || 0))
           },
           // حقول قديمة تبقى للنسخ السابقة من التطبيق، بنفس أرقام العدّاد
           // الموحّد كي لا ترى رقماً يخالف ما يُخصم.
@@ -3435,7 +3460,7 @@ export default {
             : {
                 used: freeUsed,
                 limit: freeLimit,
-                cost: Math.max(1, Math.floor(Number(settings.compatSearchCost) || 1))
+                cost: Math.max(0, Math.floor(Number(settings.compatSearchCost) || 0))
               },
           cards: caller.role === 'owner'
             ? null
@@ -4804,9 +4829,16 @@ export default {
         }
 
         if (path === '/v1/owner/users' && request.method === 'GET') {
+          const uq = (url.searchParams.get('q') ?? '').trim().toLowerCase().slice(0, 80)
+          const ulike = `%${uq}%`
           const rows = await env.XDB.prepare(
-            "SELECT id, username, display_name, role, active, device_id, expires_at, quota_balance, quota_expires_at, created_at FROM x_users WHERE role != 'guest' ORDER BY created_at DESC LIMIT 500"
-          ).all()
+            `SELECT id, username, display_name, role, active, device_id, expires_at,
+                    quota_balance, quota_expires_at, created_at
+             FROM x_users WHERE role != 'guest'
+               AND (?1 = '' OR LOWER(username) LIKE ?2 OR LOWER(display_name) LIKE ?2
+                    OR LOWER(COALESCE(device_id,'')) LIKE ?2)
+             ORDER BY created_at DESC LIMIT 500`
+          ).bind(uq, ulike).all()
           return sealed({ users: rows.results ?? [] })
         }
 
@@ -4839,6 +4871,11 @@ export default {
 
         // محافظ الزوار: عملات يشتريها الزائر بلا حساب، مفتاحها معرّف الجهاز.
         if (path === '/v1/owner/wallets' && request.method === 'GET') {
+          // بحث بالمعرّف أو اسم المستخدم أو آخر IP. الاستعلام في SQL لا في
+          // العميل: القائمة مسقوفة بـ500 صف، فالبحث بعد الجلب كان يخفي
+          // المحافظ التي لم تدخل الصفحة الأولى.
+          const wq = (url.searchParams.get('q') ?? '').trim().toLowerCase().slice(0, 80)
+          const wlike = `%${wq}%`
           const rows = await env.XDB.prepare(
             `SELECT w.device_id, w.balance, w.expires_at, w.updated_at,
                     (SELECT app_version FROM x_installs i
@@ -4854,8 +4891,14 @@ export default {
                       WHERE u.device_id = w.device_id LIMIT 1) username,
                     (SELECT id FROM x_users u
                       WHERE u.device_id = w.device_id LIMIT 1) user_id
-             FROM x_guest_wallets w ORDER BY w.updated_at DESC LIMIT 500`
-          ).all()
+             FROM x_guest_wallets w
+             WHERE ?1 = '' OR LOWER(w.device_id) LIKE ?2
+                OR EXISTS (SELECT 1 FROM x_installs i2 WHERE i2.device_id = w.device_id
+                           AND LOWER(i2.last_ip) LIKE ?2)
+                OR EXISTS (SELECT 1 FROM x_users u2 WHERE u2.device_id = w.device_id
+                           AND (LOWER(u2.username) LIKE ?2 OR LOWER(u2.display_name) LIKE ?2))
+             ORDER BY w.updated_at DESC LIMIT 500`
+          ).bind(wq, wlike).all()
           return sealed({ wallets: rows.results ?? [] })
         }
 
@@ -4939,6 +4982,43 @@ export default {
                updated_at = ?4`
           ).bind(dev, coins, days > 0 ? Date.now() + days * DAY * 1000 : 0, now).run()
           return sealed({ ok: true })
+        }
+
+        // شحن جماعي: يضيف عملات لكل المحافظ (أو للمطابقة للبحث) دفعة واحدة.
+        // `all=1` يشمل كل المحافظ؛ غيابه يقصر الشحن على نتائج `q`.
+        // إضافة لا تعيين: الرصيد يتراكم ولا يُصفّر — كالشحن الفردي.
+        if (path === '/v1/owner/wallets/bulk' && request.method === 'POST') {
+          const body = await request.json() as {
+            coins?: number; days?: number; all?: boolean; q?: string
+          }
+          const coins = Math.max(0, Math.min(1000000, Math.floor(Number(body.coins) || 0)))
+          if (coins <= 0) throw new HttpError(400, 'عدد العملات مطلوب')
+          const days = Math.max(0, Math.min(3650, Math.floor(Number(body.days) || 0)))
+          const all = body.all === true
+          const wq = all ? '' : String(body.q ?? '').trim().toLowerCase().slice(0, 80)
+          if (!all && !wq) throw new HttpError(400, 'حدّد «الكل» أو نصّ بحث')
+          const now = new Date().toISOString()
+          const expiresAt = days > 0 ? Date.now() + days * DAY * 1000 : 0
+          // UPDATE..SELECT واحد: لا حلقة ولا دفعات، فيصلح لآلاف الصفوف.
+          // فرعان لأن SQLite لا يضمن تقييم تعبير الشرط بلا FROM.
+          const result = all
+            ? await env.XDB.prepare(
+                `UPDATE x_guest_wallets
+                 SET balance = balance + ?1, expires_at = ?2, updated_at = ?3`
+              ).bind(coins, expiresAt, now).run()
+            : await env.XDB.prepare(
+                `UPDATE x_guest_wallets
+                 SET balance = balance + ?1, expires_at = ?2, updated_at = ?3
+                 WHERE LOWER(device_id) LIKE ?4
+                    OR EXISTS (SELECT 1 FROM x_installs i WHERE i.device_id = x_guest_wallets.device_id
+                               AND LOWER(i.last_ip) LIKE ?4)
+                    OR EXISTS (SELECT 1 FROM x_users u WHERE u.device_id = x_guest_wallets.device_id
+                               AND (LOWER(u.username) LIKE ?4 OR LOWER(u.display_name) LIKE ?4))`
+              ).bind(coins, expiresAt, now, `%${wq}%`).run()
+          const affected = Number((result.meta as { changes?: number } | undefined)?.changes ?? 0)
+          await logSecurity(env, request, 'wallets_bulk_grant',
+            `coins=${coins} days=${days} all=${all} q=${wq || '-'} affected=${affected}`)
+          return sealed({ ok: true, affected, coins, days })
         }
 
         // حظر الأجهزة: عرض/حظر/فك

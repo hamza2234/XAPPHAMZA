@@ -595,6 +595,52 @@ class _SettingsTabState extends State<_SettingsTab> {
               ),
             ]),
             const Divider(height: 20),
+            // ثمن فتح ملف مخطط — نفس عملة المنحة والعملات.
+            // صفر يعني مجاني تماماً بلا خصم أي عملة، وليس «سعراً افتراضياً».
+            Row(children: [
+              Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('ثمن فتح المخطط',
+                          style: TextStyle(fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 4),
+                      Text(
+                          s.schemFilePrice == 0
+                              ? 'مجاني — بلا خصم أي عملة'
+                              : 'يُخصم ${s.schemFilePrice} من العملات عند فتح ملف '
+                                  'مخطط بعد نفاد المنحة اليومية',
+                          style: TextStyle(
+                              color: XTheme.textDim, fontSize: 12)),
+                    ]),
+              ),
+              IconButton(
+                onPressed: s.schemFilePrice <= 0
+                    ? null
+                    : () => setState(() => s.schemFilePrice--),
+                icon: const Icon(Icons.remove_circle_outline, size: 20),
+              ),
+              Container(
+                width: 46,
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                decoration: BoxDecoration(
+                    color: XTheme.gold.withOpacity(.12),
+                    borderRadius: BorderRadius.circular(10)),
+                child: Text('${s.schemFilePrice}',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        color: XTheme.gold,
+                        fontSize: 16)),
+              ),
+              IconButton(
+                onPressed: s.schemFilePrice >= 100
+                    ? null
+                    : () => setState(() => s.schemFilePrice++),
+                icon: const Icon(Icons.add_circle_outline, size: 20),
+              ),
+            ]),
+            const Divider(height: 20),
             _switch('قفل التطبيق كلياً',
                 'إيقاف التطبيق لجميع المستخدمين (صيانة)', s.appLocked,
                 (v) => setState(() => s.appLocked = v)),
@@ -848,6 +894,8 @@ class _UsersTab extends StatefulWidget {
 
 class _UsersTabState extends State<_UsersTab> {
   List<dynamic>? _users;
+  final _search = TextEditingController();
+  String _q = '';
 
   @override
   void initState() {
@@ -855,9 +903,15 @@ class _UsersTabState extends State<_UsersTab> {
     _load();
   }
 
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
   Future<void> _load() async {
     try {
-      final u = await widget.api.ownerUsers();
+      final u = await widget.api.ownerUsers(q: _q);
       if (mounted) setState(() => _users = u);
     } catch (_) {}
   }
@@ -968,18 +1022,47 @@ class _UsersTabState extends State<_UsersTab> {
             style: TextStyle(
                 color: Colors.white, fontWeight: FontWeight.w800)),
       ),
-      body: _users == null
-          ? Center(
-              child: CircularProgressIndicator(color: XTheme.accent))
-          : _users!.isEmpty
+      body: Column(children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 14, 14, 4),
+          child: TextField(
+            controller: _search,
+            onChanged: (v) => setState(() => _q = v.trim()),
+            onSubmitted: (_) => _load(),
+            decoration: InputDecoration(
+              hintText: 'ابحث باسم المستخدم أو الاسم الظاهر أو معرّف الجهاز',
+              isDense: true,
+              prefixIcon: const Icon(Icons.search, size: 18),
+              suffixIcon: _q.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      onPressed: () {
+                        _search.clear();
+                        setState(() => _q = '');
+                        _load();
+                      },
+                    ),
+            ),
+          ),
+        ),
+        Expanded(
+          child: _users == null
               ? Center(
-                  child: Text('لا يوجد مستخدمون',
-                      style: TextStyle(color: XTheme.textDim)))
-              : RefreshIndicator(
-                  onRefresh: _load,
-                  color: XTheme.accent,
-                  child: _list(),
-    ));
+                  child: CircularProgressIndicator(color: XTheme.accent))
+              : _users!.isEmpty
+                  ? Center(
+                      child: Text(
+                          _q.isEmpty ? 'لا يوجد مستخدمون' : 'لا نتائج مطابقة',
+                          style: TextStyle(color: XTheme.textDim)))
+                  : RefreshIndicator(
+                      onRefresh: _load,
+                      color: XTheme.accent,
+                      child: _list(),
+                    ),
+        ),
+      ]),
+    );
   }
 
   /// حوار شحن بطاقات مخططات لمستخدم — يُنفَّذ في السيرفر فقط
@@ -1807,6 +1890,58 @@ class _BansTabState extends State<_BansTab> {
 
 // ============ محافظ الزوار ============
 
+/// بطاقة رقم صغيرة داخل رأس محافظ الزوار (إجمالي/صفر/بلا صلاحية).
+class _WalletStat extends StatelessWidget {
+  const _WalletStat(
+      {required this.label, required this.value, required this.color});
+  final String label;
+  final String value;
+  final Color color;
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+      decoration: BoxDecoration(
+        color: color.withOpacity(.10),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(children: [
+        Text(value,
+            style: TextStyle(
+                fontWeight: FontWeight.w900, fontSize: 16, color: color)),
+        const SizedBox(height: 2),
+        Text(label,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: XTheme.textDim, fontSize: 10)),
+      ]),
+    );
+  }
+}
+
+/// وسم صغير لأيقونة + نص (اسم/إصدار/IP/تاريخ).
+class _Chip extends StatelessWidget {
+  const _Chip({required this.icon, required this.text});
+  final IconData icon;
+  final String text;
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: XTheme.textDim.withOpacity(.10),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 11, color: XTheme.textDim),
+        const SizedBox(width: 4),
+        Text(text,
+            style: TextStyle(color: XTheme.textDim, fontSize: 10.5),
+            textDirection: TextDirection.ltr),
+      ]),
+    );
+  }
+}
+
 /// محافظ الزوار: عملات تُشحن لجهاز بلا حساب.
 ///
 /// الزائر لم يكن له رصيد إطلاقاً، فكانت حصته المجانية إن نفدت يتوقف تماماً
@@ -1824,6 +1959,9 @@ class _WalletsTabState extends State<_WalletsTab> {
   final _dev = TextEditingController();
   final _coins = TextEditingController(text: '5');
   final _days = TextEditingController(text: '30');
+  final _search = TextEditingController();
+  String _q = '';
+  bool _bulkAll = true;
 
   @override
   void initState() {
@@ -1836,12 +1974,13 @@ class _WalletsTabState extends State<_WalletsTab> {
     _dev.dispose();
     _coins.dispose();
     _days.dispose();
+    _search.dispose();
     super.dispose();
   }
 
   Future<void> _load() async {
     try {
-      final w = await widget.api.ownerWallets();
+      final w = await widget.api.ownerWallets(q: _q);
       if (mounted) setState(() => _rows = w);
     } catch (_) {
       if (mounted) setState(() => _rows = []);
@@ -1865,17 +2004,133 @@ class _WalletsTabState extends State<_WalletsTab> {
     }
   }
 
+  /// شحن جماعي بخطوتين: تأكيد ثم تنفيذ. يعرض النطاق (الكل أو نتائج البحث)
+  /// قبل الكتابة، لأن الشحن الجماعي لا رجعة فيه.
+  Future<void> _grantBulk() async {
+    final coins = int.tryParse(_coins.text.trim()) ?? 0;
+    if (coins <= 0) return;
+    final days = int.tryParse(_days.text.trim()) ?? 0;
+    final scope = _bulkAll ? 'كل المحافظ' : 'نتائج البحث';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('شحن جماعي'),
+        content: Text('سيُضاف $coins عملة إلى $scope'
+            '${_bulkAll ? '' : ' («$_q»)'}.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('إلغاء')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('شحن')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      final n = await widget.api
+          .grantWalletBulk(coins, days, all: _bulkAll, q: _q);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('تم شحن $n محفظة بـ $coins عملة')));
+      }
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('فشل الشحن الجماعي: $e')));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final rows = _rows;
+    final totalCoins = (rows ?? const [])
+        .fold<int>(0, (a, w) => a + (((w as Map)['balance'] as num?)?.toInt() ?? 0));
+    final zeroCount = (rows ?? const [])
+        .where((w) => (((w as Map)['balance'] as num?)?.toInt() ?? 0) == 0)
+        .length;
     return Column(children: [
       Padding(
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 6),
+        child: GlassCard(
+          padding: const EdgeInsets.all(12),
+          child: Column(children: [
+            Row(children: [
+              Icon(Icons.account_balance_wallet_outlined,
+                  color: XTheme.gold, size: 20),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text('محافظ الزوار',
+                    style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14)),
+              ),
+              Text('${rows?.length ?? 0}',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w900,
+                      color: XTheme.accent,
+                      fontSize: 15)),
+            ]),
+            const SizedBox(height: 8),
+            Row(children: [
+              Expanded(
+                child: _WalletStat(
+                  label: 'إجمالي العملات',
+                  value: '$totalCoins',
+                  color: XTheme.gold,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _WalletStat(
+                  label: 'رصيد صفر',
+                  value: '$zeroCount',
+                  color: zeroCount > 0 ? XTheme.danger : XTheme.textDim,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _WalletStat(
+                  label: 'بلا صلاحية',
+                  value:
+                      '${(rows ?? const []).where((w) => (((w as Map)['expires_at'] as num?)?.toInt() ?? 0) == 0).length}',
+                  color: XTheme.textDim,
+                ),
+              ),
+            ]),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _search,
+              onChanged: (v) => setState(() => _q = v.trim()),
+              onSubmitted: (_) => _load(),
+              decoration: InputDecoration(
+                hintText: 'ابحث بمعرّف الجهاز أو اسم المستخدم أو IP',
+                isDense: true,
+                prefixIcon: const Icon(Icons.search, size: 18),
+                suffixIcon: _q.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () {
+                          _search.clear();
+                          setState(() => _q = '');
+                          _load();
+                        },
+                      ),
+              ),
+            ),
+          ]),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(14, 8, 14, 6),
         child: GlassCard(
           padding: const EdgeInsets.all(12),
           child: Column(children: [
             Text(
               'شحن عملات لزائر بمعرّف جهازه. الزائر بلا حساب، فيُعرَّف بجهازه — '
-              'انسخ المعرّف من تبويب «الحظر» أو من طلبات الشراء.',
+              'انسخ المعرّف من القائمة أدناه أو من تبويب «الحظر».',
               style: TextStyle(color: XTheme.textDim, fontSize: 11.5),
             ),
             const SizedBox(height: 10),
@@ -1906,122 +2161,182 @@ class _WalletsTabState extends State<_WalletsTab> {
               ),
             ]),
             const SizedBox(height: 10),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: _grant,
-                icon: const Icon(Icons.add_card, size: 18),
-                label: const Text('شحن الرصيد'),
+            Row(children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _grant,
+                  icon: const Icon(Icons.add_card, size: 18),
+                  label: const Text('شحن الرصيد'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _grantBulk,
+                  style: FilledButton.styleFrom(
+                      backgroundColor: XTheme.gold.withOpacity(.16),
+                      foregroundColor: XTheme.gold),
+                  icon: const Icon(Icons.groups_rounded, size: 18),
+                  label: const Text('شحن للكل'),
+                ),
+              ),
+            ]),
+            const SizedBox(height: 6),
+            InkWell(
+              onTap: () => setState(() => _bulkAll = !_bulkAll),
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+                child: Row(children: [
+                  Icon(
+                      _bulkAll
+                          ? Icons.check_box_rounded
+                          : Icons.check_box_outline_blank_rounded,
+                      size: 20,
+                      color: _bulkAll ? XTheme.accent : XTheme.textDim),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _bulkAll
+                          ? '«شحن للكل» يشمل كل المحافظ'
+                          : '«شحن للكل» يقصر على نتائج البحث الحالية',
+                      style: TextStyle(
+                          color: XTheme.textDim, fontSize: 11.5),
+                    ),
+                  ),
+                ]),
               ),
             ),
           ]),
         ),
       ),
       Expanded(
-        child: _rows == null
+        child: rows == null
             ? Center(child: CircularProgressIndicator(color: XTheme.accent))
-            : _rows!.isEmpty
+            : rows.isEmpty
                 ? Center(
-                    child: Text('لا محافظ بعد',
+                    child: Text(
+                        _q.isEmpty ? 'لا محافظ بعد' : 'لا نتائج مطابقة للبحث',
                         style: TextStyle(color: XTheme.textDim)))
                 : RefreshIndicator(
                     onRefresh: _load,
                     color: XTheme.accent,
                     child: ListView.builder(
                       padding: const EdgeInsets.fromLTRB(14, 0, 14, 24),
-                      itemCount: _rows!.length,
-                      itemBuilder: (context, i) {
-                        final w = _rows![i];
-                        final bal = (w['balance'] as num?)?.toInt() ?? 0;
-                        final exp = (w['expires_at'] as num?)?.toInt() ?? 0;
-                        final expired =
-                            exp > 0 && exp <= DateTime.now().millisecondsSinceEpoch;
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: GlassCard(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 14, vertical: 10),
-                            child: Row(children: [
-                              Icon(Icons.account_balance_wallet_outlined,
-                                  color: bal > 0 ? XTheme.gold : XTheme.textDim,
-                                  size: 20),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      '${w['device_id']}',
-                                      style: const TextStyle(
-                                          fontSize: 11.5,
-                                          fontWeight: FontWeight.w700),
-                                      textDirection: TextDirection.ltr,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    Text(
-                                      expired
-                                          ? 'منتهية الصلاحية'
-                                          : exp > 0
-                                              ? 'صالحة حتى ${DateTime.fromMillisecondsSinceEpoch(exp).toLocal().toString().split(' ').first}'
-                                              : 'بلا تاريخ انتهاء',
-                                      style: TextStyle(
-                                          fontSize: 10.5,
-                                          color: expired
-                                              ? XTheme.danger
-                                              : XTheme.textDim),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              Text('$bal',
-                                  style: TextStyle(
-                                      fontWeight: FontWeight.w900,
-                                      fontSize: 15,
-                                      color: bal > 0
-                                          ? XTheme.gold
-                                          : XTheme.danger)),
-                              const SizedBox(width: 6),
-                              IconButton(
-                                tooltip: 'نسخ معرّف الجهاز',
-                                onPressed: () =>
-                                    copyDeviceId(context, '${w['device_id']}'),
-                                icon: const Icon(Icons.copy_rounded, size: 18),
-                              ),
-                              IconButton(
-                                tooltip: 'شحن 5 عملات',
-                                onPressed: () async {
-                                  await widget.api.grantWallet(
-                                      '${w['device_id']}', 5, 0);
-                                  _load();
-                                },
-                                icon: const Icon(Icons.add, size: 18),
-                              ),
-                              // تحكم كامل: إنقاص، تعديل، حذف — لا شحن فقط.
-                              IconButton(
-                                tooltip: 'إنقاص عملة',
-                                onPressed: () => _adjust(w, -1),
-                                icon: const Icon(Icons.remove, size: 18),
-                              ),
-                              IconButton(
-                                tooltip: 'تعديل المحفظة',
-                                onPressed: () => _edit(w),
-                                icon: const Icon(Icons.tune, size: 18),
-                              ),
-                              IconButton(
-                                tooltip: 'حذف المحفظة',
-                                onPressed: () => _delete(w),
-                                icon: Icon(Icons.delete_outline,
-                                    size: 18, color: XTheme.danger),
-                              ),
-                            ]),
-                          ),
-                        );
-                      },
+                      itemCount: rows.length,
+                      itemBuilder: (context, i) => _walletCard(rows[i]),
                     ),
                   ),
       ),
     ]);
+  }
+
+  Widget _walletCard(dynamic row) {
+    final w = row as Map;
+    final dev = '${w['device_id']}';
+    final bal = (w['balance'] as num?)?.toInt() ?? 0;
+    final exp = (w['expires_at'] as num?)?.toInt() ?? 0;
+    final expired = exp > 0 && exp <= DateTime.now().millisecondsSinceEpoch;
+    final username = '${w['username'] ?? ''}';
+    final ip = '${w['last_ip'] ?? ''}';
+    final ver = '${w['app_version'] ?? ''}';
+    final lastSeen = (w['last_seen'] as String?) ?? '';
+    final seen = lastSeen.isEmpty
+        ? ''
+        : lastSeen.split('T').first;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: GlassCard(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(Icons.account_balance_wallet_outlined,
+                color: bal > 0 ? XTheme.gold : XTheme.textDim, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                dev,
+                style: const TextStyle(
+                    fontSize: 11.5, fontWeight: FontWeight.w700),
+                textDirection: TextDirection.ltr,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+              decoration: BoxDecoration(
+                  color: (bal > 0 ? XTheme.gold : XTheme.danger).withOpacity(.12),
+                  borderRadius: BorderRadius.circular(20)),
+              child: Text('$bal',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: 15,
+                      color: bal > 0 ? XTheme.gold : XTheme.danger)),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Wrap(spacing: 6, runSpacing: 4, children: [
+            if (username.isNotEmpty)
+              _Chip(icon: Icons.person_outline, text: username),
+            if (ver.isNotEmpty && ver != 'null')
+              _Chip(icon: Icons.android, text: 'إصدار $ver'),
+            if (ip.isNotEmpty && ip != 'null')
+              _Chip(icon: Icons.public, text: ip),
+            if (seen.isNotEmpty)
+              _Chip(icon: Icons.schedule, text: seen),
+          ]),
+          const SizedBox(height: 4),
+          Row(children: [
+            Icon(expired ? Icons.error_outline : Icons.event_available,
+                size: 13,
+                color: expired ? XTheme.danger : XTheme.textDim),
+            const SizedBox(width: 4),
+            Text(
+              expired
+                  ? 'منتهية الصلاحية'
+                  : exp > 0
+                      ? 'صالحة حتى ${DateTime.fromMillisecondsSinceEpoch(exp).toLocal().toString().split(' ').first}'
+                      : 'بلا تاريخ انتهاء',
+              style: TextStyle(
+                  fontSize: 10.5,
+                  color: expired ? XTheme.danger : XTheme.textDim),
+            ),
+          ]),
+          const SizedBox(height: 2),
+          Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+            IconButton(
+              tooltip: 'نسخ معرّف الجهاز',
+              onPressed: () => copyDeviceId(context, dev),
+              icon: const Icon(Icons.copy_rounded, size: 18),
+            ),
+            IconButton(
+              tooltip: 'شحن 5 عملات',
+              onPressed: () async {
+                await widget.api.grantWallet(dev, 5, 0);
+                _load();
+              },
+              icon: const Icon(Icons.add, size: 18),
+            ),
+            IconButton(
+              tooltip: 'إنقاص عملة',
+              onPressed: () => _adjust(w, -1),
+              icon: const Icon(Icons.remove, size: 18),
+            ),
+            IconButton(
+              tooltip: 'تعديل المحفظة',
+              onPressed: () => _edit(w),
+              icon: const Icon(Icons.tune, size: 18),
+            ),
+            IconButton(
+              tooltip: 'حذف المحفظة',
+              onPressed: () => _delete(w),
+              icon: Icon(Icons.delete_outline, size: 18, color: XTheme.danger),
+            ),
+          ]),
+        ]),
+      ),
+    );
   }
 
   /// إنقاص/زيادة بجرعة — الرصيد لا ينزل تحت الصفر على الخادم.
