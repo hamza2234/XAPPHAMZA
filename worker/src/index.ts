@@ -215,7 +215,9 @@ async function grantCapReached(
 ): Promise<boolean> {
   const addr = ip(request)
   if (addr === 'unknown') return false
-  const n = Number(await env.QUOTA.get(`grantcap:${name}:${addr}`)) || 0
+  // سقف المنح لا يُسقط الطلب عند تعذّر KV: غياب العدّاد يمنح مجاناً، وهذا
+  // أفضل من حرمان جهاز سليم. الحدّ الحقيقي يبقى الخصم من الرصيد.
+  const n = Number(await kvGet(env, `grantcap:${name}:${addr}`)) || 0
   return n >= max
 }
 
@@ -227,7 +229,7 @@ async function grantCapBump(env: Env, request: Request, name: string): Promise<v
   const addr = ip(request)
   if (addr === 'unknown') return
   const key = `grantcap:${name}:${addr}`
-  const n = Number(await env.QUOTA.get(key)) || 0
+  const n = Number(await kvGet(env, key)) || 0
   try {
     await env.QUOTA.put(key, String(n + 1), { expirationTtl: DAY })
   } catch { /* تعذّر التسجيل لا يمنع ما مُنح فعلاً */ }

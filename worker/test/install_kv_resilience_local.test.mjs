@@ -91,6 +91,18 @@ test('cached() returns the built value even when the KV write fails', async () =
   assert.equal(value[0].id, 'apple')
 })
 
+test('grant cap reads survive a KV failure without throwing', async () => {
+  const f = fixture(failingKv)
+  f.context.request = new Request('http://localhost/v1/install', {
+    method: 'POST', headers: { 'x-forwarded-for': '1.2.3.4' },
+  })
+  const reached = await vm.runInContext(
+    "grantCapReached(env, request, 'install')", f.context)
+  assert.equal(reached, false)
+  await vm.runInContext("grantCapBump(env, request, 'install')", f.context)
+  assert.ok(true)
+})
+
 test('/v1/install still records the install and grants 50 with KV writes failing', async () => {
   const f = fixture(failingKv)
   f.context.settings = { installBonus: 50, dailyFreeQuota: 5, compatSearchCost: 1 }
